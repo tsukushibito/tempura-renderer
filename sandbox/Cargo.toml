@@ -1,0 +1,17 @@
+[package]
+name = "ash_sample"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+raw-window-handle = { version = "0.4.3" }
+ash = { version = "0.37.0", default-features = false, features = ["linked", "debug"]}
+ash-window = { version = "0.10.0"}
+
+[dev-dependencies]
+winit = "0.26.1"
+
+[[example]]
+name = "example"
