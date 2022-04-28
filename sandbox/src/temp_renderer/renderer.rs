@@ -55,8 +55,16 @@ impl Renderer {
             let instance = create_instance(&entry, window_handle);
             let debug_callback = create_debug_call_back(&entry, &instance);
             let surface = create_surface(&entry, &instance, window_handle);
-            let (pdevice, queue_family_index) = get_physical_device(&entry, &instance, &surface);
+            let surface_loader = Surface::new(&entry, &instance);
+            let (pdevice, queue_family_index) =
+                get_physical_device(&entry, &instance, &surface, &surface_loader);
             let device = create_device(&instance, &pdevice, queue_family_index);
+
+            let present_queue = device.get_device_queue(queue_family_index, 0);
+
+            let swapchain =
+                create_swapchain(&instance, &pdevice, &device, &surface_loader, &surface);
+
             Self {
                 entry: entry,
                 instance: instance,
@@ -130,11 +138,11 @@ unsafe fn get_physical_device(
     entry: &Entry,
     instance: &Instance,
     surface: &vk::SurfaceKHR,
+    surface_loader: &Surface,
 ) -> (PhysicalDevice, u32) {
     let pdevices = instance
         .enumerate_physical_devices()
         .expect("Physical device error");
-    let surface_loader = Surface::new(&entry, &instance);
     let (pdevice, queue_family_index) = pdevices
         .iter()
         .find_map(|pdevice| {
@@ -182,4 +190,66 @@ unsafe fn create_device(
         .create_device(*pdevice, &device_create_info, None)
         .unwrap();
     device
+}
+
+unsafe fn create_swapchain(
+    instance: &Instance,
+    pdevice: &PhysicalDevice,
+    device: &Device,
+    surface_loader: &Surface,
+    surface: &vk::SurfaceKHR,
+) -> vk::SwapchainKHR {
+    let surface_format = surface_loader
+        .get_physical_device_surface_formats(*pdevice, *surface)
+        .unwrap()[0];
+    let surface_capabilities = surface_loader
+        .get_physical_device_surface_capabilities(*pdevice, *surface)
+        .unwrap();
+    let mut desired_image_count = surface_capabilities.min_image_count + 1;
+    if surface_capabilities.max_image_count > 0
+        && desired_image_count > surface_capabilities.max_image_count
+    {
+        desired_image_count = surface_capabilities.max_image_count;
+    }
+    let surface_resolution = match surface_capabilities.current_extent.width {
+        std::u32::MAX => vk::Extent2D {
+            width: 1920,
+            height: 1080,
+        },
+        _ => surface_capabilities.current_extent,
+    };
+    let pre_transform = if surface_capabilities
+        .supported_transforms
+        .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+    {
+        vk::SurfaceTransformFlagsKHR::IDENTITY
+    } else {
+        surface_capabilities.current_transform
+    };
+    let present_modes = surface_loader
+        .get_physical_device_surface_present_modes(*pdevice, *surface)
+        .unwrap();
+    let present_mode = present_modes
+        .iter()
+        .cloned()
+        .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
+        .unwrap_or(vk::PresentModeKHR::FIFO);
+    let swapchain_loader = Swapchain::new(&instance, &device);
+    let swapchain_create_info = *vk::SwapchainCreateInfoKHR::builder()
+        .surface(*surface)
+        .min_image_count(desired_image_count)
+        .image_color_space(surface_format.color_space)
+        .image_format(surface_format.format)
+        .image_extent(surface_resolution)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .pre_transform(pre_transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(present_mode)
+        .clipped(true)
+        .image_array_layers(1);
+    let swapchain = swapchain_loader
+        .create_swapchain(&swapchain_create_info, None)
+        .unwrap();
+    swapchain
 }
