@@ -59,11 +59,37 @@ impl Renderer {
             let (pdevice, queue_family_index) =
                 get_physical_device(&entry, &instance, &surface, &surface_loader);
             let device = create_device(&instance, &pdevice, queue_family_index);
-
             let present_queue = device.get_device_queue(queue_family_index, 0);
 
-            let swapchain =
-                create_swapchain(&instance, &pdevice, &device, &surface_loader, &surface);
+            let surface_format = surface_loader
+                .get_physical_device_surface_formats(pdevice, surface)
+                .unwrap()[0];
+            let swapchain_loader = Swapchain::new(&instance, &device);
+            let (swapchain, surface_resolution) = create_swapchain(
+                &pdevice,
+                &surface_loader,
+                &surface,
+                &surface_format,
+                &swapchain_loader,
+            );
+
+            let command_buffers = create_command_buffers(&device, queue_family_index);
+            let setup_command_buffer = command_buffers[0];
+            let draw_command_buffer = command_buffers[1];
+
+            let present_image_views =
+                create_present_image_views(&device, &swapchain_loader, &swapchain, &surface_format);
+            let device_memory_properties = instance.get_physical_device_memory_properties(pdevice);
+            let depth_image_create_info = *vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::D16_UNORM)
+                .extent(surface_resolution.into())
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
             Self {
                 entry: entry,
@@ -193,15 +219,12 @@ unsafe fn create_device(
 }
 
 unsafe fn create_swapchain(
-    instance: &Instance,
     pdevice: &PhysicalDevice,
-    device: &Device,
     surface_loader: &Surface,
     surface: &vk::SurfaceKHR,
-) -> vk::SwapchainKHR {
-    let surface_format = surface_loader
-        .get_physical_device_surface_formats(*pdevice, *surface)
-        .unwrap()[0];
+    surface_format: &vk::SurfaceFormatKHR,
+    swapchain_loader: &Swapchain,
+) -> (vk::SwapchainKHR, vk::Extent2D) {
     let surface_capabilities = surface_loader
         .get_physical_device_surface_capabilities(*pdevice, *surface)
         .unwrap();
@@ -234,7 +257,6 @@ unsafe fn create_swapchain(
         .cloned()
         .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
         .unwrap_or(vk::PresentModeKHR::FIFO);
-    let swapchain_loader = Swapchain::new(&instance, &device);
     let swapchain_create_info = *vk::SwapchainCreateInfoKHR::builder()
         .surface(*surface)
         .min_image_count(desired_image_count)
@@ -251,5 +273,56 @@ unsafe fn create_swapchain(
     let swapchain = swapchain_loader
         .create_swapchain(&swapchain_create_info, None)
         .unwrap();
-    swapchain
+    (swapchain, surface_resolution)
+}
+
+unsafe fn create_command_buffers(
+    device: &Device,
+    queue_family_index: u32,
+) -> Vec<vk::CommandBuffer> {
+    let pool_create_info = *vk::CommandPoolCreateInfo::builder()
+        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+        .queue_family_index(queue_family_index);
+    let pool = device.create_command_pool(&pool_create_info, None).unwrap();
+
+    let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+        .command_buffer_count(2)
+        .command_pool(pool)
+        .level(vk::CommandBufferLevel::PRIMARY);
+    let command_buffers = device
+        .allocate_command_buffers(&command_buffer_allocate_info)
+        .unwrap();
+    command_buffers
+}
+
+unsafe fn create_present_image_views(
+    device: &Device,
+    swapchain_loader: &Swapchain,
+    swapchain: &vk::SwapchainKHR,
+    surface_format: &vk::SurfaceFormatKHR,
+) -> Vec<vk::ImageView> {
+    let present_images = swapchain_loader.get_swapchain_images(*swapchain).unwrap();
+    present_images
+        .iter()
+        .map(|&image| {
+            let create_view_info = *vk::ImageViewCreateInfo::builder()
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(surface_format.format)
+                .components(vk::ComponentMapping {
+                    r: vk::ComponentSwizzle::R,
+                    g: vk::ComponentSwizzle::G,
+                    b: vk::ComponentSwizzle::B,
+                    a: vk::ComponentSwizzle::A,
+                })
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image(image);
+            device.create_image_view(&create_view_info, None).unwrap()
+        })
+        .collect()
 }
