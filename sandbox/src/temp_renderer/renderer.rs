@@ -80,16 +80,17 @@ impl Renderer {
             let present_image_views =
                 create_present_image_views(&device, &swapchain_loader, &swapchain, &surface_format);
             let device_memory_properties = instance.get_physical_device_memory_properties(pdevice);
-            let depth_image_create_info = *vk::ImageCreateInfo::builder()
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(vk::Format::D16_UNORM)
-                .extent(surface_resolution.into())
-                .mip_levels(1)
-                .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let depth_image = create_depth_image(&instance, &pdevice, &device, &surface_resolution);
+
+            let fence_create_info =
+                *vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+
+            let draw_commands_reuse_fence = device
+                .create_fence(&fence_create_info, None)
+                .expect("Create fence failed.");
+            let setup_commands_reuse_fence = device
+                .create_fence(&fence_create_info, None)
+                .expect("Create fence failed.");
 
             Self {
                 entry: entry,
@@ -325,4 +326,111 @@ unsafe fn create_present_image_views(
             device.create_image_view(&create_view_info, None).unwrap()
         })
         .collect()
+}
+
+fn find_memorytype_index(
+    memory_req: &vk::MemoryRequirements,
+    memory_prop: &vk::PhysicalDeviceMemoryProperties,
+    flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    memory_prop.memory_types[..memory_prop.memory_type_count as _]
+        .iter()
+        .enumerate()
+        .find(|(index, memory_type)| {
+            (1 << index) & memory_req.memory_type_bits != 0
+                && memory_type.property_flags & flags == flags
+        })
+        .map(|(index, _memory_type)| index as _)
+}
+
+unsafe fn create_depth_image(
+    instance: &Instance,
+    pdevice: &PhysicalDevice,
+    device: &Device,
+    surface_resolution: &vk::Extent2D,
+) -> vk::Image {
+    let device_memory_properties = instance.get_physical_device_memory_properties(*pdevice);
+    let depth_image_create_info = *vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(vk::Format::D16_UNORM)
+        .extent((*surface_resolution).into())
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let depth_image = device.create_image(&depth_image_create_info, None).unwrap();
+    let depth_image_memory_req = device.get_image_memory_requirements(depth_image);
+    let depth_image_memory_index = find_memorytype_index(
+        &depth_image_memory_req,
+        &device_memory_properties,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )
+    .expect("Unable to find suitable memory index for depth image.");
+    let depth_image_allocate_info = *vk::MemoryAllocateInfo::builder()
+        .allocation_size(depth_image_memory_req.size)
+        .memory_type_index(depth_image_memory_index);
+
+    let depth_image_memory = device
+        .allocate_memory(&depth_image_allocate_info, None)
+        .unwrap();
+
+    device
+        .bind_image_memory(depth_image, depth_image_memory, 0)
+        .expect("Unable to bind depth image memory");
+
+    depth_image
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_submit_commandbuffer<F: FnOnce(&Device, vk::CommandBuffer)>(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    command_buffer_reuse_fence: vk::Fence,
+    submit_queue: vk::Queue,
+    wait_mask: &[vk::PipelineStageFlags],
+    wait_semaphores: &[vk::Semaphore],
+    signal_semaphores: &[vk::Semaphore],
+    f: F,
+) {
+    unsafe {
+        device
+            .wait_for_fences(&[command_buffer_reuse_fence], true, std::u64::MAX)
+            .expect("Wait for fence failed.");
+
+        device
+            .reset_fences(&[command_buffer_reuse_fence])
+            .expect("Reset fences failed.");
+
+        device
+            .reset_command_buffer(
+                command_buffer,
+                vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+            )
+            .expect("Reset command buffer failed.");
+
+        let command_buffer_begin_info = *vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        device
+            .begin_command_buffer(command_buffer, &command_buffer_begin_info)
+            .expect("Begin commandbuffer");
+        f(device, command_buffer);
+        device
+            .end_command_buffer(command_buffer)
+            .expect("End commandbuffer");
+
+        let command_buffers = vec![command_buffer];
+
+        let submit_info = *vk::SubmitInfo::builder()
+            .wait_semaphores(wait_semaphores)
+            .wait_dst_stage_mask(wait_mask)
+            .command_buffers(&command_buffers)
+            .signal_semaphores(signal_semaphores);
+
+        device
+            .queue_submit(submit_queue, &[submit_info], command_buffer_reuse_fence)
+            .expect("queue submit failed.");
+    }
 }
