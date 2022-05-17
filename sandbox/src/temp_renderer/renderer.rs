@@ -45,7 +45,22 @@ unsafe extern "system" fn vulkan_debug_callback(
 pub struct Renderer {
     entry: Entry,
     instance: Instance,
+    debug_utils_loader: DebugUtils,
+    surface_loader: Surface,
+    swapchain_loader: Swapchain,
+    pdevice: PhysicalDevice,
     device: Device,
+    debug_callback: vk::DebugUtilsMessengerEXT,
+    surface: vk::SurfaceKHR,
+    command_pool: vk::CommandPool,
+    present_image_views: Vec<vk::ImageView>,
+    depth_image: vk::Image,
+    depth_image_view: vk::ImageView,
+    depth_image_memory: vk::DeviceMemory,
+    setup_commands_reuse_fence: vk::Fence,
+    draw_commands_reuse_fence: vk::Fence,
+    rendering_complete_semaphore: vk::Semaphore,
+    present_complete_semaphore: vk::Semaphore,
 }
 
 impl Renderer {
@@ -53,7 +68,8 @@ impl Renderer {
         unsafe {
             let entry = Entry::linked();
             let instance = create_instance(&entry, window_handle);
-            let debug_callback = create_debug_call_back(&entry, &instance);
+            let debug_utils_loader = DebugUtils::new(&entry, &instance);
+            let debug_callback = create_debug_call_back(&debug_utils_loader);
             let surface = create_surface(&entry, &instance, window_handle);
             let surface_loader = Surface::new(&entry, &instance);
             let (pdevice, queue_family_index) =
@@ -91,6 +107,38 @@ impl Renderer {
             let setup_commands_reuse_fence = device
                 .create_fence(&fence_create_info, None)
                 .expect("Create fence failed.");
+
+            optimize_depth_image_layout(
+                &device,
+                &setup_command_buffer,
+                &setup_commands_reuse_fence,
+                &present_queue,
+                &depth_image,
+            );
+
+            let depth_image_view_info = *vk::ImageViewCreateInfo::builder()
+                .subresource_range(
+                    *vk::ImageSubresourceRange::builder()
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                        .level_count(1)
+                        .layer_count(1),
+                )
+                .image(depth_image)
+                .format(vk::Format::D16_UNORM)
+                .view_type(vk::ImageViewType::TYPE_2D);
+
+            let depth_image_view = device
+                .create_image_view(&depth_image_view_info, None)
+                .unwrap();
+
+            let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+
+            let present_complete_semaphore = device
+                .create_semaphore(&semaphore_create_info, None)
+                .unwrap();
+            let rendering_complete_semaphore = device
+                .create_semaphore(&semaphore_create_info, None)
+                .unwrap();
 
             Self {
                 entry: entry,
@@ -133,7 +181,7 @@ unsafe fn create_instance(entry: &Entry, window_handle: &dyn HasRawWindowHandle)
     instance
 }
 
-unsafe fn create_debug_call_back(entry: &Entry, instance: &Instance) -> vk::DebugUtilsMessengerEXT {
+unsafe fn create_debug_call_back(debug_utils_loader: &DebugUtils) -> vk::DebugUtilsMessengerEXT {
     let debug_info = *vk::DebugUtilsMessengerCreateInfoEXT::builder()
         .message_severity(
             vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
@@ -146,7 +194,6 @@ unsafe fn create_debug_call_back(entry: &Entry, instance: &Instance) -> vk::Debu
                 | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
         )
         .pfn_user_callback(Some(vulkan_debug_callback));
-    let debug_utils_loader = DebugUtils::new(&entry, &instance);
     let debug_callback = debug_utils_loader
         .create_debug_utils_messenger(&debug_info, None)
         .unwrap();
@@ -381,6 +428,50 @@ unsafe fn create_depth_image(
         .expect("Unable to bind depth image memory");
 
     depth_image
+}
+
+unsafe fn optimize_depth_image_layout(
+    device: &Device,
+    setup_command_buffer: &vk::CommandBuffer,
+    setup_commands_reuse_fence: &vk::Fence,
+    present_queue: &vk::Queue,
+    depth_image: &vk::Image,
+) {
+    record_submit_commandbuffer(
+        device,
+        *setup_command_buffer,
+        *setup_commands_reuse_fence,
+        *present_queue,
+        &[],
+        &[],
+        &[],
+        |device, setup_command_buffer| {
+            let layout_transition_barriers = *vk::ImageMemoryBarrier::builder()
+                .image(*depth_image)
+                .dst_access_mask(
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
+                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .subresource_range(
+                    *vk::ImageSubresourceRange::builder()
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                        .layer_count(1)
+                        .level_count(1),
+                );
+
+            device.cmd_pipeline_barrier(
+                setup_command_buffer,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[layout_transition_barriers],
+            );
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
