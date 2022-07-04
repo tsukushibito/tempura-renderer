@@ -43,24 +43,24 @@ unsafe extern "system" fn vulkan_debug_callback(
 }
 
 pub struct Renderer {
-    entry: Entry,
-    instance: Instance,
-    debug_utils_loader: DebugUtils,
-    surface_loader: Surface,
-    swapchain_loader: Swapchain,
-    pdevice: PhysicalDevice,
-    device: Device,
-    debug_callback: vk::DebugUtilsMessengerEXT,
-    surface: vk::SurfaceKHR,
-    command_pool: vk::CommandPool,
-    present_image_views: Vec<vk::ImageView>,
-    depth_image: vk::Image,
-    depth_image_view: vk::ImageView,
-    depth_image_memory: vk::DeviceMemory,
-    setup_commands_reuse_fence: vk::Fence,
-    draw_commands_reuse_fence: vk::Fence,
-    rendering_complete_semaphore: vk::Semaphore,
-    present_complete_semaphore: vk::Semaphore,
+    pub entry: Entry,
+    pub instance: Instance,
+    pub debug_utils_loader: DebugUtils,
+    pub surface_loader: Surface,
+    pub swapchain_loader: Swapchain,
+    pub pdevice: PhysicalDevice,
+    pub device: Device,
+    pub debug_callback: vk::DebugUtilsMessengerEXT,
+    pub surface: vk::SurfaceKHR,
+    pub command_pool: vk::CommandPool,
+    pub present_image_views: Vec<vk::ImageView>,
+    pub depth_image: vk::Image,
+    pub depth_image_view: vk::ImageView,
+    pub depth_image_memory: vk::DeviceMemory,
+    pub setup_commands_reuse_fence: vk::Fence,
+    pub draw_commands_reuse_fence: vk::Fence,
+    pub rendering_complete_semaphore: vk::Semaphore,
+    pub present_complete_semaphore: vk::Semaphore,
 }
 
 impl Renderer {
@@ -89,14 +89,16 @@ impl Renderer {
                 &swapchain_loader,
             );
 
-            let command_buffers = create_command_buffers(&device, queue_family_index);
+            let command_pool = create_command_pool(&device, queue_family_index);
+            let command_buffers = create_command_buffers(&device, &command_pool);
             let setup_command_buffer = command_buffers[0];
             let draw_command_buffer = command_buffers[1];
 
             let present_image_views =
                 create_present_image_views(&device, &swapchain_loader, &swapchain, &surface_format);
             let device_memory_properties = instance.get_physical_device_memory_properties(pdevice);
-            let depth_image = create_depth_image(&instance, &pdevice, &device, &surface_resolution);
+            let (depth_image, depth_image_memory) =
+                create_depth_image(&instance, &pdevice, &device, &surface_resolution);
 
             let fence_create_info =
                 *vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
@@ -141,9 +143,24 @@ impl Renderer {
                 .unwrap();
 
             Self {
-                entry: entry,
-                instance: instance,
-                device: device,
+                entry,
+                instance,
+                debug_utils_loader,
+                surface_loader,
+                swapchain_loader,
+                pdevice,
+                device,
+                debug_callback,
+                surface,
+                command_pool,
+                present_image_views,
+                depth_image,
+                depth_image_view,
+                depth_image_memory,
+                setup_commands_reuse_fence,
+                draw_commands_reuse_fence,
+                rendering_complete_semaphore,
+                present_complete_semaphore,
             }
         }
     }
@@ -175,10 +192,9 @@ unsafe fn create_instance(entry: &Entry, window_handle: &dyn HasRawWindowHandle)
         .enabled_layer_names(&layer_names_raw)
         .enabled_extension_names(&extension_names);
 
-    let instance = entry
+    entry
         .create_instance(&create_info, None)
-        .expect("Instance creation error");
-    instance
+        .expect("Instance creation error")
 }
 
 unsafe fn create_debug_call_back(debug_utils_loader: &DebugUtils) -> vk::DebugUtilsMessengerEXT {
@@ -194,10 +210,9 @@ unsafe fn create_debug_call_back(debug_utils_loader: &DebugUtils) -> vk::DebugUt
                 | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
         )
         .pfn_user_callback(Some(vulkan_debug_callback));
-    let debug_callback = debug_utils_loader
+    debug_utils_loader
         .create_debug_utils_messenger(&debug_info, None)
-        .unwrap();
-    debug_callback
+        .unwrap()
 }
 
 unsafe fn create_surface(
@@ -205,7 +220,7 @@ unsafe fn create_surface(
     instance: &Instance,
     window_handle: &dyn HasRawWindowHandle,
 ) -> vk::SurfaceKHR {
-    ash_window::create_surface(&entry, &instance, &window_handle, None).unwrap()
+    ash_window::create_surface(entry, instance, &window_handle, None).unwrap()
 }
 
 unsafe fn get_physical_device(
@@ -324,23 +339,25 @@ unsafe fn create_swapchain(
     (swapchain, surface_resolution)
 }
 
-unsafe fn create_command_buffers(
-    device: &Device,
-    queue_family_index: u32,
-) -> Vec<vk::CommandBuffer> {
+unsafe fn create_command_pool(device: &Device, queue_family_index: u32) -> vk::CommandPool {
     let pool_create_info = *vk::CommandPoolCreateInfo::builder()
         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
         .queue_family_index(queue_family_index);
-    let pool = device.create_command_pool(&pool_create_info, None).unwrap();
+    device.create_command_pool(&pool_create_info, None).unwrap()
+}
 
+unsafe fn create_command_buffers(
+    device: &Device,
+    pool: &vk::CommandPool,
+) -> Vec<vk::CommandBuffer> {
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
         .command_buffer_count(2)
-        .command_pool(pool)
+        .command_pool(*pool)
         .level(vk::CommandBufferLevel::PRIMARY);
-    let command_buffers = device
+
+    device
         .allocate_command_buffers(&command_buffer_allocate_info)
-        .unwrap();
-    command_buffers
+        .unwrap()
 }
 
 unsafe fn create_present_image_views(
@@ -395,7 +412,7 @@ unsafe fn create_depth_image(
     pdevice: &PhysicalDevice,
     device: &Device,
     surface_resolution: &vk::Extent2D,
-) -> vk::Image {
+) -> (vk::Image, vk::DeviceMemory) {
     let device_memory_properties = instance.get_physical_device_memory_properties(*pdevice);
     let depth_image_create_info = *vk::ImageCreateInfo::builder()
         .image_type(vk::ImageType::TYPE_2D)
@@ -427,7 +444,7 @@ unsafe fn create_depth_image(
         .bind_image_memory(depth_image, depth_image_memory, 0)
         .expect("Unable to bind depth image memory");
 
-    depth_image
+    (depth_image, depth_image_memory)
 }
 
 unsafe fn optimize_depth_image_layout(
